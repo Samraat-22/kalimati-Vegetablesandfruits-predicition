@@ -73,6 +73,8 @@ def main():
         st.stop()
 
     df["avg_price"] = pd.to_numeric(df["avg_price"], errors="coerce")
+    df = df.dropna(subset=["avg_price", "date"])
+
     df["commodity_base"] = (
         df["commodity"].astype(str).str.split("(").str[0].str.strip()
     )
@@ -81,71 +83,80 @@ def main():
     df = df[df["category"] != "Other"]
 
     # ------------------------------------------------------------------
-    # URL-shareable category + commodity selectors
+    # Commodity search (URL-shareable)
     # ------------------------------------------------------------------
-    category_options = ["All", "Fruit", "Vegetable"]
-    query_category = st.query_params.get("category", "All")
-    if query_category not in category_options:
-        query_category = "All"
+    st.subheader("Search a specific item")
 
-    selected_category = st.selectbox(
-        "Select category",
-        category_options,
-        index=category_options.index(query_category),
+    commodity_list = sorted(df["commodity"].dropna().unique())
+
+    # Read commodity from the URL if present (e.g. ?commodity=Tomato Big(Nepali))
+    query_commodity = st.query_params.get("commodity", None)
+    default_index = (
+        commodity_list.index(query_commodity)
+        if query_commodity in commodity_list
+        else 0
     )
-
-    # Commodity choices depend on the chosen category
-    if selected_category == "All":
-        available_commodities = sorted(df["commodity_base"].unique().tolist())
-    else:
-        available_commodities = sorted(
-            df.loc[df["category"] == selected_category, "commodity_base"].unique().tolist()
-        )
-    commodity_options = ["All"] + available_commodities
-
-    query_commodity = st.query_params.get("commodity", "All")
-    if query_commodity not in commodity_options:
-        query_commodity = "All"
 
     selected_commodity = st.selectbox(
-        "Select a commodity (or 'All')",
-        commodity_options,
-        index=commodity_options.index(query_commodity),
+        "Choose a commodity",
+        commodity_list,
+        index=default_index,
     )
 
-    # Keep the URL in sync with the current selections so the page can be shared
-    if selected_category == "All":
-        if "category" in st.query_params:
-            del st.query_params["category"]
-    else:
-        st.query_params["category"] = selected_category
+    # Keep the URL in sync so the link can be copied and shared
+    st.query_params["commodity"] = selected_commodity
 
-    if selected_commodity == "All":
-        if "commodity" in st.query_params:
-            del st.query_params["commodity"]
-    else:
-        st.query_params["commodity"] = selected_commodity
+    item_df = df[df["commodity"] == selected_commodity].sort_values("date")
 
-    if selected_category != "All":
-        df = df[df["category"] == selected_category]
-    if selected_commodity != "All":
-        df = df[df["commodity_base"] == selected_commodity]
+    if not item_df.empty:
+        min_date = item_df["date"].min().date()
+        max_date = item_df["date"].max().date()
 
-    if selected_category != "All" or selected_commodity != "All":
-        label = " / ".join(
-            v for v in [selected_category, selected_commodity] if v != "All"
+        st.markdown(f"**Price Trend from {min_date} to {max_date}**")
+
+        fig_item, ax_item = plt.subplots(figsize=(10, 4))
+        ax_item.plot(item_df["date"], item_df["avg_price"], color="#1f77b4")
+        ax_item.set_xlabel("Date")
+        ax_item.set_ylabel("Average Price (NPR)")
+        ax_item.set_title(selected_commodity)
+        st.pyplot(fig_item)
+
+        summary = pd.DataFrame(
+            {
+                "commodity": [selected_commodity],
+                "Min_Price": [item_df["avg_price"].min()],
+                "Max_Price": [item_df["avg_price"].max()],
+                "Average_Price": [item_df["avg_price"].mean()],
+                "Latest_Price": [item_df["avg_price"].iloc[-1]],
+            }
         )
-        st.caption(f"Showing data filtered to: **{label}**")
+        st.markdown("### 📊 Summary Statistics")
+        st.dataframe(summary, hide_index=True)
 
+        st.info(
+            "Copy the link from your browser's address bar to share this "
+            f"exact view of **{selected_commodity}** with someone."
+        )
+    else:
+        st.warning("No data found for this commodity.")
+
+    st.divider()
+
+    # ------------------------------------------------------------------
+    # Overall Fruit vs Vegetable comparison (original charts)
+    # ------------------------------------------------------------------
     st.subheader("Summary statistics")
     st.dataframe(df.groupby("category")["avg_price"].describe())
 
     daily_avg = df.groupby(["date", "category"])["avg_price"].mean().unstack()
 
-    if "Fruit" not in daily_avg.columns:
-        daily_avg["Fruit"] = pd.NA
-    if "Vegetable" not in daily_avg.columns:
-        daily_avg["Vegetable"] = pd.NA
+    # Make sure both columns exist even if one category is briefly missing
+    # on some dates, and force everything to numeric so plotting never
+    # breaks on stray non-numeric values.
+    for col in ["Fruit", "Vegetable"]:
+        if col not in daily_avg.columns:
+            daily_avg[col] = pd.NA
+        daily_avg[col] = pd.to_numeric(daily_avg[col], errors="coerce")
 
     daily_avg["difference"] = daily_avg["Fruit"] - daily_avg["Vegetable"]
 
@@ -178,7 +189,10 @@ def main():
     axes[1, 0].set_title("Daily average price over time")
     axes[1, 0].set_ylabel("Avg price (NPR)")
 
-    axes[1, 1].plot(daily_avg.index, daily_avg["difference"], color="purple")
+    # Drop any rows where "difference" ended up NaN so matplotlib never
+    # chokes on a non-numeric / masked value.
+    diff_data = daily_avg["difference"].dropna()
+    axes[1, 1].plot(diff_data.index, diff_data.values, color="purple")
     axes[1, 1].axhline(0, color="black", lw=0.8)
     axes[1, 1].set_title("Price difference over time (Fruit − Vegetable)")
     axes[1, 1].set_ylabel("NPR difference")
