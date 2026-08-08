@@ -1,5 +1,6 @@
 import matplotlib.pyplot as plt
 import pandas as pd
+import streamlit as st
 
 FRUITS = {
     "Amla",
@@ -41,7 +42,12 @@ def classify(commodity_base: str) -> str:
 
 
 def main():
-    file_path = r"c:\Users\ACER\Downloads\vegetable.csv"
+    st.title("Fruit vs Vegetable Price Analysis")
+
+    # IMPORTANT: this file must be in the SAME folder as this script,
+    # and committed to your GitHub repo.
+    file_path = "vegetable.csv"
+
     columns = [
         "commodity",
         "date",
@@ -51,13 +57,20 @@ def main():
         "avg_price",
     ]
 
-    df = pd.read_csv(
-        file_path,
-        header=None,
-        names=columns,
-        parse_dates=["date"],
-        skipinitialspace=True,
-    )
+    try:
+        df = pd.read_csv(
+            file_path,
+            header=None,
+            names=columns,
+            parse_dates=["date"],
+            skipinitialspace=True,
+        )
+    except FileNotFoundError:
+        st.error(
+            f"Could not find '{file_path}'. Make sure vegetable.csv is uploaded "
+            "to the same GitHub folder as this script."
+        )
+        st.stop()
 
     df["avg_price"] = pd.to_numeric(df["avg_price"], errors="coerce")
     df["commodity_base"] = (
@@ -67,17 +80,18 @@ def main():
     df["category"] = df["commodity_base"].apply(classify)
     df = df[df["category"] != "Other"]
 
-    print(df.groupby("category")["avg_price"].describe())
+    st.subheader("Summary statistics")
+    st.dataframe(df.groupby("category")["avg_price"].describe())
 
     daily_avg = df.groupby(["date", "category"])["avg_price"].mean().unstack()
     daily_avg["difference"] = daily_avg["Fruit"] - daily_avg["Vegetable"]
-    print(
-        "\nOverall mean price -> Fruit: {:.2f}, Vegetable: {:.2f}, Diff: {:.2f}".format(
-            daily_avg["Fruit"].mean(),
-            daily_avg["Vegetable"].mean(),
-            daily_avg["difference"].mean(),
-        )
-    )
+
+    st.subheader("Overall averages")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Fruit avg (NPR)", f"{daily_avg['Fruit'].mean():.2f}")
+    col2.metric("Vegetable avg (NPR)", f"{daily_avg['Vegetable'].mean():.2f}")
+    col3.metric("Difference (NPR)", f"{daily_avg['difference'].mean():.2f}")
+
     daily_avg.to_csv("fruit_vs_vegetable_daily.csv")
 
     fig, axes = plt.subplots(2, 2, figsize=(14, 10))
@@ -107,8 +121,11 @@ def main():
     axes[1, 1].set_ylabel("NPR difference")
 
     plt.tight_layout()
+
+    st.subheader("Charts")
+    st.pyplot(fig)
+
     plt.savefig("fruit_vs_vegetable_price.png", dpi=110)
-    print("Saved fruit_vs_vegetable_price.png")
 
 
 if __name__ == "__main__":
