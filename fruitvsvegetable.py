@@ -81,33 +81,61 @@ def main():
     df = df[df["category"] != "Other"]
 
     # ------------------------------------------------------------------
-    # URL-shareable commodity selector
+    # URL-shareable category + commodity selectors
     # ------------------------------------------------------------------
-    commodity_options = ["All"] + sorted(df["commodity_base"].unique().tolist())
+    category_options = ["All", "Fruit", "Vegetable"]
+    query_category = st.query_params.get("category", "All")
+    if query_category not in category_options:
+        query_category = "All"
 
-    # Read the commodity from the URL query params, if present
+    selected_category = st.selectbox(
+        "Select category",
+        category_options,
+        index=category_options.index(query_category),
+    )
+
+    # Commodity choices depend on the chosen category
+    if selected_category == "All":
+        available_commodities = sorted(df["commodity_base"].unique().tolist())
+    else:
+        available_commodities = sorted(
+            df.loc[df["category"] == selected_category, "commodity_base"].unique().tolist()
+        )
+    commodity_options = ["All"] + available_commodities
+
     query_commodity = st.query_params.get("commodity", "All")
     if query_commodity not in commodity_options:
         query_commodity = "All"
 
-    default_index = commodity_options.index(query_commodity)
-
     selected_commodity = st.selectbox(
-        "Select a commodity (or 'All' for the full Fruit vs Vegetable view)",
+        "Select a commodity (or 'All')",
         commodity_options,
-        index=default_index,
+        index=commodity_options.index(query_commodity),
     )
 
-    # Keep the URL in sync with the current selection so the page can be shared
+    # Keep the URL in sync with the current selections so the page can be shared
+    if selected_category == "All":
+        if "category" in st.query_params:
+            del st.query_params["category"]
+    else:
+        st.query_params["category"] = selected_category
+
     if selected_commodity == "All":
         if "commodity" in st.query_params:
             del st.query_params["commodity"]
     else:
         st.query_params["commodity"] = selected_commodity
 
+    if selected_category != "All":
+        df = df[df["category"] == selected_category]
     if selected_commodity != "All":
         df = df[df["commodity_base"] == selected_commodity]
-        st.caption(f"Showing data filtered to: **{selected_commodity}**")
+
+    if selected_category != "All" or selected_commodity != "All":
+        label = " / ".join(
+            v for v in [selected_category, selected_commodity] if v != "All"
+        )
+        st.caption(f"Showing data filtered to: **{label}**")
 
     st.subheader("Summary statistics")
     st.dataframe(df.groupby("category")["avg_price"].describe())
