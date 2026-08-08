@@ -67,11 +67,11 @@ def build_features(item_df: pd.DataFrame) -> pd.DataFrame:
     return data
 
 
-def predict_next_day_price(item_df: pd.DataFrame):
-    """Train a small RandomForest on history and forecast the next price.
+def train_price_model(item_df: pd.DataFrame):
+    """Train a RandomForest on one commodity's price history.
 
-    Returns (predicted_price, mean_abs_error_on_recent_data) or
-    (None, None) if there isn't enough history to train on.
+    Returns (model, feature_cols, mae) or (None, None, None) if there
+    isn't enough history to train on.
     """
     data = build_features(item_df)
 
@@ -88,7 +88,7 @@ def predict_next_day_price(item_df: pd.DataFrame):
     train_data = data.dropna(subset=feature_cols + ["avg_price"])
 
     if len(train_data) < MIN_ROWS_FOR_PREDICTION:
-        return None, None
+        return None, None, None
 
     X = train_data[feature_cols]
     y = train_data["avg_price"]
@@ -110,27 +110,62 @@ def predict_next_day_price(item_df: pd.DataFrame):
     # prediction uses every known data point, not just the training split.
     model.fit(X, y)
 
-    # Build the feature row for "tomorrow" using the most recent known data
+    return model, feature_cols, mae
+
+
+def predict_price_for_date(item_df: pd.DataFrame, target_date: pd.Timestamp):
+    """Forecast a commodity's price for any future date.
+
+    Works recursively day-by-day from the last known date up to
+    target_date, feeding each day's prediction back in as the "lag_1"
+    input for the next day. Accuracy naturally degrades the further
+    target_date is from the last known data point.
+
+    Returns (predicted_price, mean_abs_error_on_recent_data, days_ahead)
+    or (None, None, None) if there isn't enough history to train on.
+    """
+    model, feature_cols, mae = train_price_model(item_df)
+    if model is None:
+        return None, None, None
+
+    data = item_df[["date", "avg_price"]].sort_values("date").reset_index(drop=True)
     last_date = data["date"].max()
-    next_date = last_date + pd.Timedelta(days=1)
 
-    recent_prices = data["avg_price"]
-    next_features = pd.DataFrame(
-        [
-            {
-                "day_of_week": next_date.dayofweek,
-                "month": next_date.month,
-                "day_of_year": next_date.dayofyear,
-                "lag_1": recent_prices.iloc[-1],
-                "lag_7": recent_prices.iloc[-7] if len(recent_prices) >= 7 else recent_prices.iloc[-1],
-                "rolling_mean_7": recent_prices.tail(7).mean(),
-                "rolling_mean_14": recent_prices.tail(14).mean(),
-            }
-        ]
-    )
+    days_ahead = (target_date - last_date).days
+    if days_ahead < 1:
+        days_ahead = 1
+        target_date = last_date + pd.Timedelta(days=1)
 
-    predicted_price = model.predict(next_features)[0]
-    return predicted_price, mae
+    # Recursively step forward one day at a time, appending each
+    # prediction to the price series so the next step's lag/rolling
+    # features are based on the freshest (predicted) values.
+    working_prices = data["avg_price"].tolist()
+    working_dates = data["date"].tolist()
+
+    predicted_price = None
+    for _ in range(days_ahead):
+        next_date = working_dates[-1] + pd.Timedelta(days=1)
+        series = pd.Series(working_prices)
+
+        next_features = pd.DataFrame(
+            [
+                {
+                    "day_of_week": next_date.dayofweek,
+                    "month": next_date.month,
+                    "day_of_year": next_date.dayofyear,
+                    "lag_1": series.iloc[-1],
+                    "lag_7": series.iloc[-7] if len(series) >= 7 else series.iloc[-1],
+                    "rolling_mean_7": series.tail(7).mean(),
+                    "rolling_mean_14": series.tail(14).mean(),
+                }
+            ]
+        )
+
+        predicted_price = model.predict(next_features[feature_cols])[0]
+        working_prices.append(predicted_price)
+        working_dates.append(next_date)
+
+    return predicted_price, mae, days_ahead
 
 
 def main():
@@ -226,11 +261,23 @@ def main():
         st.dataframe(summary, hide_index=True)
 
         # --------------------------------------------------------------
-        # Next-day price prediction
+        # Price prediction for a chosen future date
         # --------------------------------------------------------------
-        st.markdown("### 🔮 Tomorrow's Price Prediction")
+        st.markdown("### 🔮 Price Prediction")
 
-        predicted_price, mae = predict_next_day_price(item_df)
+        last_known_date = item_df["date"].max().date()
+        default_target = last_known_date + pd.Timedelta(days=1)
+
+        target_date = st.date_input(
+            "Predict price for this date",
+            value=default_target,
+            min_value=default_target,
+        )
+        target_ts = pd.Timestamp(target_date)
+
+        predicted_price, mae, days_ahead = predict_price_for_date(
+            item_df, target_ts
+        )
 
         if predicted_price is None:
             st.warning(
@@ -245,12 +292,12 @@ def main():
 
             pred_col1, pred_col2 = st.columns(2)
             pred_col1.metric(
-                "Predicted price (NPR)",
+                f"Predicted price for {target_date} (NPR)",
                 f"{predicted_price:.2f}",
-                delta=f"{change:+.2f} ({change_pct:+.1f}%)",
+                delta=f"{change:+.2f} ({change_pct:+.1f}%) vs last known price",
             )
             if mae is not None:
-                pred_col2.metric("Model's typical error (NPR)", f"±{mae:.2f}")
+                pred_col2.metric("Model's typical 1-day error (NPR)", f"±{mae:.2f}")
 
             st.caption(
                 "This is a simple estimate from a RandomForest model trained "
@@ -258,6 +305,15 @@ def main():
                 "recent price trends). It is not financial advice — actual "
                 "market prices can move for reasons the model can't see."
             )
+
+            if days_ahead > 7:
+                st.warning(
+                    f"This forecast is {days_ahead} days beyond the last "
+                    "recorded price. The model predicts day by day and "
+                    "feeds each guess into the next, so errors compound — "
+                    "treat predictions this far out as a rough trend, not "
+                    "a precise number."
+                )
 
         st.info(
             "Copy the link from your browser's address bar to share this "
