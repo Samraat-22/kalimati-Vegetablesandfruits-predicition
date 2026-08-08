@@ -58,7 +58,7 @@ def build_features(item_df: pd.DataFrame) -> pd.DataFrame:
     data["month"] = data["date"].dt.month
     data["day_of_year"] = data["date"].dt.dayofyear
 
-    # Lag features: yesterday's price, and short-term rolling averages
+   
     data["lag_1"] = data["avg_price"].shift(1)
     data["lag_7"] = data["avg_price"].shift(7)
     data["rolling_mean_7"] = data["avg_price"].shift(1).rolling(7).mean()
@@ -93,7 +93,7 @@ def train_price_model(item_df: pd.DataFrame):
     X = train_data[feature_cols]
     y = train_data["avg_price"]
 
-    # Hold out the most recent 10 rows to sanity-check accuracy
+
     split = max(len(X) - 10, int(len(X) * 0.85))
     X_train, X_test = X.iloc[:split], X.iloc[split:]
     y_train, y_test = y.iloc[:split], y.iloc[split:]
@@ -106,8 +106,7 @@ def train_price_model(item_df: pd.DataFrame):
         preds_test = model.predict(X_test)
         mae = (preds_test - y_test).abs().mean()
 
-    # Refit on ALL available data before forecasting forward, so the
-    # prediction uses every known data point, not just the training split.
+   
     model.fit(X, y)
 
     return model, feature_cols, mae
@@ -136,9 +135,6 @@ def predict_price_for_date(item_df: pd.DataFrame, target_date: pd.Timestamp):
         days_ahead = 1
         target_date = last_date + pd.Timedelta(days=1)
 
-    # Recursively step forward one day at a time, appending each
-    # prediction to the price series so the next step's lag/rolling
-    # features are based on the freshest (predicted) values.
     working_prices = data["avg_price"].tolist()
     working_dates = data["date"].tolist()
 
@@ -171,8 +167,7 @@ def predict_price_for_date(item_df: pd.DataFrame, target_date: pd.Timestamp):
 def main():
     st.title("Fruit vs Vegetable Price Analysis")
 
-    # IMPORTANT: this file must be in the SAME folder as this script,
-    # and committed to your GitHub repo.
+    
     file_path = "vegetable.csv"
 
     columns = [
@@ -209,14 +204,11 @@ def main():
     df["category"] = df["commodity_base"].apply(classify)
     df = df[df["category"] != "Other"]
 
-    # ------------------------------------------------------------------
-    # Commodity search (URL-shareable)
-    # ------------------------------------------------------------------
     st.subheader("Search a specific item")
 
     commodity_list = sorted(df["commodity"].dropna().unique())
 
-    # Read commodity from the URL if present (e.g. ?commodity=Tomato Big(Nepali))
+  
     query_commodity = st.query_params.get("commodity", None)
     default_index = (
         commodity_list.index(query_commodity)
@@ -230,7 +222,7 @@ def main():
         index=default_index,
     )
 
-    # Keep the URL in sync so the link can be copied and shared
+   
     st.query_params["commodity"] = selected_commodity
 
     item_df = df[df["commodity"] == selected_commodity].sort_values("date")
@@ -260,9 +252,6 @@ def main():
         st.markdown("### 📊 Summary Statistics")
         st.dataframe(summary, hide_index=True)
 
-        # --------------------------------------------------------------
-        # Price prediction for a chosen future date
-        # --------------------------------------------------------------
         st.markdown("### 🔮 Price Prediction")
 
         last_known_date = item_df["date"].max().date()
@@ -324,17 +313,13 @@ def main():
 
     st.divider()
 
-    # ------------------------------------------------------------------
-    # Overall Fruit vs Vegetable comparison (original charts)
-    # ------------------------------------------------------------------
+
     st.subheader("Summary statistics")
     st.dataframe(df.groupby("category")["avg_price"].describe())
 
     daily_avg = df.groupby(["date", "category"])["avg_price"].mean().unstack()
 
-    # Make sure both columns exist even if one category is briefly missing
-    # on some dates, and force everything to numeric so plotting never
-    # breaks on stray non-numeric values.
+    
     for col in ["Fruit", "Vegetable"]:
         if col not in daily_avg.columns:
             daily_avg[col] = pd.NA
@@ -371,8 +356,6 @@ def main():
     axes[1, 0].set_title("Daily average price over time")
     axes[1, 0].set_ylabel("Avg price (NPR)")
 
-    # Drop any rows where "difference" ended up NaN so matplotlib never
-    # chokes on a non-numeric / masked value.
     diff_data = daily_avg["difference"].dropna()
     axes[1, 1].plot(diff_data.index, diff_data.values, color="purple")
     axes[1, 1].axhline(0, color="black", lw=0.8)
