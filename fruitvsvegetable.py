@@ -80,10 +80,45 @@ def main():
     df["category"] = df["commodity_base"].apply(classify)
     df = df[df["category"] != "Other"]
 
+    # ------------------------------------------------------------------
+    # URL-shareable commodity selector
+    # ------------------------------------------------------------------
+    commodity_options = ["All"] + sorted(df["commodity_base"].unique().tolist())
+
+    # Read the commodity from the URL query params, if present
+    query_commodity = st.query_params.get("commodity", "All")
+    if query_commodity not in commodity_options:
+        query_commodity = "All"
+
+    default_index = commodity_options.index(query_commodity)
+
+    selected_commodity = st.selectbox(
+        "Select a commodity (or 'All' for the full Fruit vs Vegetable view)",
+        commodity_options,
+        index=default_index,
+    )
+
+    # Keep the URL in sync with the current selection so the page can be shared
+    if selected_commodity == "All":
+        if "commodity" in st.query_params:
+            del st.query_params["commodity"]
+    else:
+        st.query_params["commodity"] = selected_commodity
+
+    if selected_commodity != "All":
+        df = df[df["commodity_base"] == selected_commodity]
+        st.caption(f"Showing data filtered to: **{selected_commodity}**")
+
     st.subheader("Summary statistics")
     st.dataframe(df.groupby("category")["avg_price"].describe())
 
     daily_avg = df.groupby(["date", "category"])["avg_price"].mean().unstack()
+
+    if "Fruit" not in daily_avg.columns:
+        daily_avg["Fruit"] = pd.NA
+    if "Vegetable" not in daily_avg.columns:
+        daily_avg["Vegetable"] = pd.NA
+
     daily_avg["difference"] = daily_avg["Fruit"] - daily_avg["Vegetable"]
 
     st.subheader("Overall averages")
