@@ -1,6 +1,7 @@
 import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
+from sklearn.ensemble import RandomForestRegressor
 
 FRUITS = {
     "Amla",
@@ -32,6 +33,8 @@ FRUITS = {
 
 OTHER = {"Fish Fresh", "Tofu", "Gundruk", "Okara"}
 
+MIN_ROWS_FOR_PREDICTION = 20
+
 
 def classify(commodity_base: str) -> str:
     if commodity_base in FRUITS:
@@ -39,6 +42,95 @@ def classify(commodity_base: str) -> str:
     if commodity_base in OTHER:
         return "Other"
     return "Vegetable"
+
+
+def build_features(item_df: pd.DataFrame) -> pd.DataFrame:
+    """Turn a single-commodity price history into a feature table.
+
+    Each row's features describe what was known *before* that day's
+    price, so a model trained on this can be reused to forecast the
+    next unseen day.
+    """
+    data = item_df[["date", "avg_price"]].copy()
+    data = data.sort_values("date").reset_index(drop=True)
+
+    data["day_of_week"] = data["date"].dt.dayofweek
+    data["month"] = data["date"].dt.month
+    data["day_of_year"] = data["date"].dt.dayofyear
+
+    # Lag features: yesterday's price, and short-term rolling averages
+    data["lag_1"] = data["avg_price"].shift(1)
+    data["lag_7"] = data["avg_price"].shift(7)
+    data["rolling_mean_7"] = data["avg_price"].shift(1).rolling(7).mean()
+    data["rolling_mean_14"] = data["avg_price"].shift(1).rolling(14).mean()
+
+    return data
+
+
+def predict_next_day_price(item_df: pd.DataFrame):
+    """Train a small RandomForest on history and forecast the next price.
+
+    Returns (predicted_price, mean_abs_error_on_recent_data) or
+    (None, None) if there isn't enough history to train on.
+    """
+    data = build_features(item_df)
+
+    feature_cols = [
+        "day_of_week",
+        "month",
+        "day_of_year",
+        "lag_1",
+        "lag_7",
+        "rolling_mean_7",
+        "rolling_mean_14",
+    ]
+
+    train_data = data.dropna(subset=feature_cols + ["avg_price"])
+
+    if len(train_data) < MIN_ROWS_FOR_PREDICTION:
+        return None, None
+
+    X = train_data[feature_cols]
+    y = train_data["avg_price"]
+
+    # Hold out the most recent 10 rows to sanity-check accuracy
+    split = max(len(X) - 10, int(len(X) * 0.85))
+    X_train, X_test = X.iloc[:split], X.iloc[split:]
+    y_train, y_test = y.iloc[:split], y.iloc[split:]
+
+    model = RandomForestRegressor(n_estimators=200, random_state=42)
+    model.fit(X_train, y_train)
+
+    mae = None
+    if len(X_test) > 0:
+        preds_test = model.predict(X_test)
+        mae = (preds_test - y_test).abs().mean()
+
+    # Refit on ALL available data before forecasting forward, so the
+    # prediction uses every known data point, not just the training split.
+    model.fit(X, y)
+
+    # Build the feature row for "tomorrow" using the most recent known data
+    last_date = data["date"].max()
+    next_date = last_date + pd.Timedelta(days=1)
+
+    recent_prices = data["avg_price"]
+    next_features = pd.DataFrame(
+        [
+            {
+                "day_of_week": next_date.dayofweek,
+                "month": next_date.month,
+                "day_of_year": next_date.dayofyear,
+                "lag_1": recent_prices.iloc[-1],
+                "lag_7": recent_prices.iloc[-7] if len(recent_prices) >= 7 else recent_prices.iloc[-1],
+                "rolling_mean_7": recent_prices.tail(7).mean(),
+                "rolling_mean_14": recent_prices.tail(14).mean(),
+            }
+        ]
+    )
+
+    predicted_price = model.predict(next_features)[0]
+    return predicted_price, mae
 
 
 def main():
@@ -132,6 +224,40 @@ def main():
         )
         st.markdown("### 📊 Summary Statistics")
         st.dataframe(summary, hide_index=True)
+
+        # --------------------------------------------------------------
+        # Next-day price prediction
+        # --------------------------------------------------------------
+        st.markdown("### 🔮 Tomorrow's Price Prediction")
+
+        predicted_price, mae = predict_next_day_price(item_df)
+
+        if predicted_price is None:
+            st.warning(
+                "Not enough historical data for this item yet to make a "
+                f"reliable prediction (need at least {MIN_ROWS_FOR_PREDICTION} "
+                "recorded days)."
+            )
+        else:
+            last_price = item_df["avg_price"].iloc[-1]
+            change = predicted_price - last_price
+            change_pct = (change / last_price * 100) if last_price else 0
+
+            pred_col1, pred_col2 = st.columns(2)
+            pred_col1.metric(
+                "Predicted price (NPR)",
+                f"{predicted_price:.2f}",
+                delta=f"{change:+.2f} ({change_pct:+.1f}%)",
+            )
+            if mae is not None:
+                pred_col2.metric("Model's typical error (NPR)", f"±{mae:.2f}")
+
+            st.caption(
+                "This is a simple estimate from a RandomForest model trained "
+                "on this item's own price history (day of week, month, and "
+                "recent price trends). It is not financial advice — actual "
+                "market prices can move for reasons the model can't see."
+            )
 
         st.info(
             "Copy the link from your browser's address bar to share this "
