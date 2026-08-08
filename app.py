@@ -216,7 +216,9 @@ if data_loaded:
           value=default_target,
           min_value=default_target,
           max_value=max_target,
+          format="YYYY/MM/DD",
           help=t["predict_date_help"],
+          key="predict_target_date",
       )
       target_date = pd.Timestamp(target_date_input)
 
@@ -274,82 +276,6 @@ if data_loaded:
     df["date"] = pd.to_datetime(df["date"])
 
     commodities_multi = st.multiselect(
-        "Select Commodities to Compare", commodities, default=[commodity]
-    )
-
-    min_df_date = df["date"].min().date()
-    max_df_date = df["date"].max().date()
-
-    col_date1, col_date2 = st.columns(2)
-    with col_date1:
-      start_date = st.date_input(
-          "Start Date",
-          value=min_df_date,
-          min_value=min_df_date,
-          max_value=max_df_date,
-      )
-    with col_date2:
-      end_date = st.date_input(
-          "End Date",
-          value=max_df_date,
-          min_value=min_df_date,
-          max_value=max_df_date,
-      )
-
-    if commodities_multi:
-      filtered_df = df[
-          (df["commodity"].isin(commodities_multi))
-          & (df["date"] >= pd.to_datetime(start_date))
-          & (df["date"] <= pd.to_datetime(end_date))
-      ].sort_values("date")
-
-      if filtered_df.empty:
-        st.warning("No data found for the selected commodity and date range.")
-      else:
-        fig2 = px.line(
-            filtered_df,
-            x="date",
-            y="avg_price",
-            color="commodity",
-            title=(
-                f"Price Trend from {start_date.strftime('%Y-%m-%d')} to"
-                f" {end_date.strftime('%Y-%m-%d')}"
-            ),
-            labels={"avg_price": "Average Price (NPR)", "date": "Date"},
-        )
-        st.plotly_chart(fig2, use_container_width=True)
-
-        st.markdown("### 📊 Summary Statistics")
-        stats = (
-            filtered_df.groupby("commodity")["avg_price"]
-            .agg(
-                Min_Price="min",
-                Max_Price="max",
-                Average_Price="mean",
-                Latest_Price="last",
-            )
-            .reset_index()
-        )
-        st.dataframe(stats, use_container_width=True)
-
-  with tab3:
-    st.subheader(t["tab3"])
-    if results:
-      res_df = pd.DataFrame(results).T.rename_axis("Model").reset_index()
-      st.dataframe(res_df, use_container_width=True)
-      fig3 = px.bar(
-          res_df, x="Model", y="MAE", title="Mean Absolute Error (Lower is Better)"
-      )
-      st.plotly_chart(fig3, use_container_width=True)
-    else:
-      st.info("Model evaluation metrics recorded during training.")
-
-      with tab2:
-
-        st.subheader(t["tab2"])
-    df["date"] = pd.to_datetime(df["date"])
-
-    commodities_multi = st.multiselect(
         "Select Commodities to Compare",
         commodities,
         default=[commodity],
@@ -359,8 +285,6 @@ if data_loaded:
     min_df_date = df["date"].min().date()
     max_df_date = df["date"].max().date()
 
-    # Safety net: if data is somehow empty or corrupted, don't let the
-    # date widgets crash the app.
     if pd.isna(min_df_date) or pd.isna(max_df_date):
       st.error("Could not determine a valid date range from the data.")
     else:
@@ -423,3 +347,15 @@ if data_loaded:
           st.dataframe(stats, use_container_width=True)
       else:
         st.info("Pick at least one commodity above to see its price history.")
+
+  with tab3:
+    st.subheader(t["tab3"])
+    if results:
+      res_df = pd.DataFrame(results).T.rename_axis("Model").reset_index()
+      st.dataframe(res_df, use_container_width=True)
+      fig3 = px.bar(
+          res_df, x="Model", y="MAE", title="Mean Absolute Error (Lower is Better)"
+      )
+      st.plotly_chart(fig3, use_container_width=True)
+    else:
+      st.info("Model evaluation metrics recorded during training.")
