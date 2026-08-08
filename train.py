@@ -84,5 +84,5 @@ artifacts = {
 
 joblib.dump(artifacts, "veg_price_model_v2.pkl")
 print(
-    f"✅ Best Model '{best_name}' trained and saved to veg_price_model_v2.pkl!"
+    f" Best Model '{best_name}' trained and saved to veg_price_model_v2.pkl!"
 )
