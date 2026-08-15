@@ -23,8 +23,12 @@ for col in CAT_FEATURES:
   encoders[col] = le
 
 FEATURE_COLS = [
-    "min_price",
-    "max_price",
+    # NOTE: min_price / max_price were removed from this list.
+    # avg_price == (min_price + max_price) / 2 in this dataset, so
+    # including them let the model just do arithmetic instead of
+    # learning to forecast -- that's why R^2 was ~1.0 before. On any
+    # future date you also won't know that day's min/max in advance,
+    # so they can't be used as prediction inputs anyway.
     "price_lag_1d",
     "price_lag_7d",
     "rolling_7d_avg",
@@ -37,13 +41,32 @@ FEATURE_COLS = [
     "unit_enc",
 ]
 
+# IMPORTANT: split by a GLOBAL date cutoff, not by row position.
+# `df` is grouped by commodity then date, so a positional 85/15 split
+# mostly separates *different commodities* into train vs test (only
+# ~1 commodity actually overlapped) rather than separating past vs
+# future dates. That made the old "test" score meaningless for
+# judging forecasting ability. Sorting by date and cutting by date
+# means test rows are genuinely later in time than every train row,
+# which is what actually matters if you plan to predict the future.
+df = df.sort_values("date").reset_index(drop=True)
+cutoff_date = df["date"].quantile(0.85, interpolation="nearest")
+train_mask = df["date"] <= cutoff_date
+test_mask = ~train_mask
+
 X = df[FEATURE_COLS]
 y = df["avg_price"]
 
-# Time Split (85% Train / 15% Test)
-split_idx = int(len(df) * 0.85)
-X_train, X_test = X.iloc[:split_idx], X.iloc[split_idx:]
-y_train, y_test = y.iloc[:split_idx], y.iloc[split_idx:]
+X_train, X_test = X[train_mask], X[test_mask]
+y_train, y_test = y[train_mask], y[test_mask]
+
+print(
+    f"Train: {train_mask.sum()} rows through {df.loc[train_mask, 'date'].max().date()}"
+)
+print(
+    f"Test:  {test_mask.sum()} rows from {df.loc[test_mask, 'date'].min().date()}"
+    f" to {df.loc[test_mask, 'date'].max().date()}"
+)
 
 models = {
     "RandomForest": RandomForestRegressor(n_estimators=200, random_state=42),

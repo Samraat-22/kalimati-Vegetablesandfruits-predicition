@@ -88,6 +88,35 @@ def load_data():
   return df
 
 
+def seasonal_baseline(hist, target_date, window_days=7, recent_years=3):
+  """Historical seasonal reference: robust (median) price recorded
+  on/around this same day-of-year, across years in hist. Prefers the
+  most recent `recent_years` years if there's enough data there, since
+  older years can be skewed by one-off shocks (e.g. a bad harvest year)
+  that no longer reflect current market conditions. Falls back to using
+  all available years if recent history is too thin.
+
+  Used as an anchor so long-range forecasts can't drift into a runaway
+  trend -- it reflects "what usually happens around this time of year"
+  instead of chaining predictions on top of predictions. Median (not
+  mean) is used because commodity prices can have volatile spike years
+  (e.g. supply shocks) that would otherwise skew a simple average.
+  """
+  doy = target_date.dayofyear
+  diff = (hist["date"].dt.dayofyear - doy).abs()
+  diff = np.minimum(diff, 365 - diff)  # handle year-boundary wraparound
+  mask = diff <= window_days
+
+  recent_cutoff = target_date.year - recent_years
+  recent_mask = mask & (hist["date"].dt.year >= recent_cutoff)
+
+  if recent_mask.sum() >= 5:
+    return hist.loc[recent_mask, "avg_price"].median()
+  if mask.sum() > 0:
+    return hist.loc[mask, "avg_price"].median()
+  return None
+
+
 def build_feature_row(target_date, working_series, last_row, commodity):
   """Build one feature row for target_date, using working_series (a
   date-indexed price Series that includes real history PLUS any
@@ -98,8 +127,6 @@ def build_feature_row(target_date, working_series, last_row, commodity):
     return working_series.iloc[idx] if idx >= 0 else working_series.iloc[0]
 
   row = {
-      "min_price": last_row.get("min_price", last_row["avg_price"] * 0.9),
-      "max_price": last_row.get("max_price", last_row["avg_price"] * 1.1),
       "price_lag_1d": lag_val(1),
       "price_lag_7d": lag_val(7),
       "rolling_7d_avg": working_series.tail(7).mean(),
@@ -114,13 +141,24 @@ def build_feature_row(target_date, working_series, last_row, commodity):
   return pd.DataFrame([row]).fillna(0)
 
 
-def predict_for_date(hist, last_row, commodity, target_date, model, encoders, feature_cols, cat_features):
+def predict_for_date(hist, last_row, commodity, target_date, model, encoders, feature_cols, cat_features,
+                      blend_full_at=90):
   """Recursively forecast forward, one day at a time, from the last known
   date up to target_date. Each step's prediction becomes an input for the
-  next step's lag/rolling features."""
+  next step's lag/rolling features.
+
+  To prevent the recursive chain from drifting into a runaway trend on
+  long horizons, each day's raw model prediction is blended with a
+  seasonal historical baseline (average real price around that
+  day-of-year in past years). The blend weight shifts from "trust the
+  model" (short horizon) to "trust the seasonal pattern" (long horizon),
+  reaching full seasonal weight by `blend_full_at` days out.
+  """
 
   series = hist.set_index("date")["avg_price"].copy()
   last_date = hist["date"].max()
+  price_floor = hist["avg_price"].min() * 0.5
+  price_cap = hist["avg_price"].max() * 1.5
 
   days_ahead = (target_date - last_date).days
   if days_ahead < 1:
@@ -129,7 +167,7 @@ def predict_for_date(hist, last_row, commodity, target_date, model, encoders, fe
 
   pred = None
   current_date = last_date
-  for _ in range(days_ahead):
+  for step in range(1, days_ahead + 1):
     current_date = current_date + timedelta(days=1)
 
     row_df = build_feature_row(current_date, series, last_row, commodity)
@@ -140,9 +178,20 @@ def predict_for_date(hist, last_row, commodity, target_date, model, encoders, fe
       row_df[c + "_enc"] = le.transform([val])[0] if val in le.classes_ else -1
 
     X_input = row_df[feature_cols]
-    pred = model.predict(X_input)[0]
+    raw_pred = model.predict(X_input)[0]
 
-    # Feed this prediction back in as if it were the newest known price
+    seasonal = seasonal_baseline(hist, current_date)
+    if seasonal is not None:
+      w = min(step / blend_full_at, 1.0)
+      pred = (1 - w) * raw_pred + w * seasonal
+    else:
+      pred = raw_pred
+
+    # Safety net: never let the forecast wander outside a sane range
+    # relative to all real prices ever observed for this commodity.
+    pred = float(np.clip(pred, price_floor, price_cap))
+
+    
     series.loc[current_date] = pred
 
   return pred, days_ahead, target_date
@@ -166,9 +215,9 @@ st.caption(t["subtitle"])
 
 if data_loaded:
   tab1, tab2, tab3 = st.tabs([
-      f"🔮 {t['tab1']}",
-      f"📈 {t['tab2']}",
-      f"📊 {t['tab3']}",
+      f" {t['tab1']}",
+      f" {t['tab2']}",
+      f" {t['tab3']}",
   ])
 
   with tab1:
@@ -185,7 +234,7 @@ if data_loaded:
     if hist.empty:
       st.warning("No historical data available for this commodity.")
     else:
-      st.markdown("### 📅 Day-by-Day Market Price View")
+      st.markdown("###  Day-by-Day Market Price View")
       hist_desc = hist.sort_values("date", ascending=False)
       latest_entry = hist_desc.iloc[0]
 
@@ -199,7 +248,7 @@ if data_loaded:
           delta=f"{delta_val:+.2f} NPR from previous record",
       )
 
-      st.markdown("### 📋 Recent Daily Records")
+      st.markdown("###  Recent Daily Records")
       st.dataframe(
           hist_desc[["date", "min_price", "avg_price", "max_price"]].head(14),
           width='stretch',
