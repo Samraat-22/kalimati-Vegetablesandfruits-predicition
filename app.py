@@ -191,7 +191,9 @@ def predict_for_date(hist, last_row, commodity, target_date, model, encoders, fe
     # relative to all real prices ever observed for this commodity.
     pred = float(np.clip(pred, price_floor, price_cap))
 
-    
+    # Feed this (blended, clipped) prediction back in as if it were the
+    # newest known price, so the next step's lag/rolling features stay
+    # anchored to something realistic.
     series.loc[current_date] = pred
 
   return pred, days_ahead, target_date
@@ -215,9 +217,9 @@ st.caption(t["subtitle"])
 
 if data_loaded:
   tab1, tab2, tab3 = st.tabs([
-      f" {t['tab1']}",
-      f" {t['tab2']}",
-      f" {t['tab3']}",
+      f"🔮 {t['tab1']}",
+      f"📈 {t['tab2']}",
+      f"📊 {t['tab3']}",
   ])
 
   with tab1:
@@ -234,7 +236,7 @@ if data_loaded:
     if hist.empty:
       st.warning("No historical data available for this commodity.")
     else:
-      st.markdown("###  Day-by-Day Market Price View")
+      st.markdown("### 📅 Day-by-Day Market Price View")
       hist_desc = hist.sort_values("date", ascending=False)
       latest_entry = hist_desc.iloc[0]
 
@@ -248,7 +250,7 @@ if data_loaded:
           delta=f"{delta_val:+.2f} NPR from previous record",
       )
 
-      st.markdown("###  Recent Daily Records")
+      st.markdown("### 📋 Recent Daily Records")
       st.dataframe(
           hist_desc[["date", "min_price", "avg_price", "max_price"]].head(14),
           width='stretch',
@@ -258,7 +260,12 @@ if data_loaded:
       last_date = last_row["date"]
 
       default_target = (last_date + timedelta(days=1)).date()
-      max_target = (last_date + timedelta(days=365)).date()
+      # Extended cap: allow forecasting out to end of 2030. Beyond ~1 year
+      # the model has no real signal left and is essentially returning a
+      # seasonal historical average -- the warning banners below make
+      # that explicit so far-out numbers aren't mistaken for real
+      # forecasts.
+      max_target = pd.Timestamp("2030-12-31").date()
 
       target_date_input = st.date_input(
           t["predict_date"],
@@ -286,7 +293,16 @@ if data_loaded:
       pc2.metric(t["change"], f"{delta:+.2f}", delta=f"{delta:+.2f}")
       pc3.metric(t["unit"], last_row.get("unit", "KG"))
 
-      if days_ahead > 180:
+      if days_ahead > 730:
+        st.error(
+            f"This forecast is {days_ahead} days ({days_ahead / 365:.1f} "
+            "years) out. At this range the model has no real predictive "
+            "signal left -- this number is essentially just the "
+            "historical seasonal average price for this time of year, "
+            "not a genuine forecast of future market conditions. Treat "
+            "it as a long-term seasonal reference point only."
+        )
+      elif days_ahead > 180:
         st.error(t["warn_far"].format(n=days_ahead))
       elif days_ahead > 30:
         st.warning(t["warn_month"].format(n=days_ahead))
