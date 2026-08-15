@@ -373,7 +373,9 @@ if data_loaded:
             key="history_end_date",
         )
 
-      if start_date > end_date:
+      if start_date is None or end_date is None:
+        st.info("Please select both a Start Date and an End Date.")
+      elif start_date > end_date:
         st.error("Start Date must be before End Date.")
       elif commodities_multi:
         filtered_df = df[
