@@ -141,6 +141,48 @@ def build_feature_row(target_date, working_series, last_row, commodity):
   return pd.DataFrame([row]).fillna(0)
 
 
+def forecast_range(hist, last_row, commodity, target_date, model, encoders, feature_cols, cat_features,
+                    blend_full_at=90):
+  """Like predict_for_date, but returns the full day-by-day forecast
+  series (date -> predicted price) from the last known date up to
+  target_date, instead of just the final value. Used to extend charts
+  (e.g. Price History) into forecasted territory."""
+
+  series = hist.set_index("date")["avg_price"].copy()
+  last_date = hist["date"].max()
+  price_floor = hist["avg_price"].min() * 0.5
+  price_cap = hist["avg_price"].max() * 1.5
+
+  days_ahead = (target_date - last_date).days
+  if days_ahead < 1:
+    return pd.DataFrame(columns=["date", "avg_price"])
+
+  records = []
+  current_date = last_date
+  for step in range(1, days_ahead + 1):
+    current_date = current_date + timedelta(days=1)
+
+    row_df = build_feature_row(current_date, series, last_row, commodity)
+    for c in cat_features:
+      le = encoders[c]
+      val = str(row_df.loc[0, c])
+      row_df[c + "_enc"] = le.transform([val])[0] if val in le.classes_ else -1
+
+    raw_pred = model.predict(row_df[feature_cols])[0]
+    seasonal = seasonal_baseline(hist, current_date)
+    if seasonal is not None:
+      w = min(step / blend_full_at, 1.0)
+      pred = (1 - w) * raw_pred + w * seasonal
+    else:
+      pred = raw_pred
+
+    pred = float(np.clip(pred, price_floor, price_cap))
+    series.loc[current_date] = pred
+    records.append({"date": current_date, "avg_price": pred})
+
+  return pd.DataFrame(records)
+
+
 def predict_for_date(hist, last_row, commodity, target_date, model, encoders, feature_cols, cat_features,
                       blend_full_at=90):
   """Recursively forecast forward, one day at a time, from the last known
@@ -154,48 +196,16 @@ def predict_for_date(hist, last_row, commodity, target_date, model, encoders, fe
   model" (short horizon) to "trust the seasonal pattern" (long horizon),
   reaching full seasonal weight by `blend_full_at` days out.
   """
-
-  series = hist.set_index("date")["avg_price"].copy()
   last_date = hist["date"].max()
-  price_floor = hist["avg_price"].min() * 0.5
-  price_cap = hist["avg_price"].max() * 1.5
-
   days_ahead = (target_date - last_date).days
   if days_ahead < 1:
     days_ahead = 1
     target_date = last_date + timedelta(days=1)
 
-  pred = None
-  current_date = last_date
-  for step in range(1, days_ahead + 1):
-    current_date = current_date + timedelta(days=1)
-
-    row_df = build_feature_row(current_date, series, last_row, commodity)
-
-    for c in cat_features:
-      le = encoders[c]
-      val = str(row_df.loc[0, c])
-      row_df[c + "_enc"] = le.transform([val])[0] if val in le.classes_ else -1
-
-    X_input = row_df[feature_cols]
-    raw_pred = model.predict(X_input)[0]
-
-    seasonal = seasonal_baseline(hist, current_date)
-    if seasonal is not None:
-      w = min(step / blend_full_at, 1.0)
-      pred = (1 - w) * raw_pred + w * seasonal
-    else:
-      pred = raw_pred
-
-    # Safety net: never let the forecast wander outside a sane range
-    # relative to all real prices ever observed for this commodity.
-    pred = float(np.clip(pred, price_floor, price_cap))
-
-    # Feed this (blended, clipped) prediction back in as if it were the
-    # newest known price, so the next step's lag/rolling features stay
-    # anchored to something realistic.
-    series.loc[current_date] = pred
-
+  full_series = forecast_range(
+      hist, last_row, commodity, target_date, model, encoders, feature_cols, cat_features, blend_full_at
+  )
+  pred = full_series["avg_price"].iloc[-1]
   return pred, days_ahead, target_date
 
 
@@ -349,6 +359,7 @@ if data_loaded:
 
     min_df_date = df["date"].min().date()
     max_df_date = df["date"].max().date()
+    max_forecast_date = pd.Timestamp("2030-12-31").date()
 
     if pd.isna(min_df_date) or pd.isna(max_df_date):
       st.error("Could not determine a valid date range from the data.")
@@ -368,8 +379,16 @@ if data_loaded:
             "End Date",
             value=max_df_date,
             min_value=min_df_date,
-            max_value=max_df_date,
+            # Allow picking dates beyond real data -- those get filled
+            # in with a forecasted continuation below, clearly marked
+            # apart from real recorded prices.
+            max_value=max_forecast_date,
             format="YYYY/MM/DD",
+            help=(
+                "Dates beyond the last recorded date "
+                f"({max_df_date.strftime('%Y-%m-%d')}) will show a "
+                "forecasted continuation instead of real data."
+            ),
             key="history_end_date",
         )
 
@@ -381,17 +400,48 @@ if data_loaded:
         filtered_df = df[
             (df["commodity"].isin(commodities_multi))
             & (df["date"] >= pd.to_datetime(start_date))
-            & (df["date"] <= pd.to_datetime(end_date))
-        ].sort_values("date")
+            & (df["date"] <= pd.to_datetime(min(end_date, max_df_date)))
+        ].sort_values("date").copy()
+        filtered_df["type"] = "Actual"
 
-        if filtered_df.empty:
+        forecast_frames = []
+        if end_date > max_df_date:
+          for c in commodities_multi:
+            c_hist = df[df["commodity"] == c].sort_values("date")
+            if c_hist.empty:
+              continue
+            c_last_row = c_hist.iloc[-1]
+            f_series = forecast_range(
+                c_hist, c_last_row, c, pd.Timestamp(end_date),
+                model, encoders, feature_cols, cat_features,
+            )
+            if not f_series.empty:
+              f_series["commodity"] = c
+              f_series["type"] = "Forecast"
+              forecast_frames.append(f_series)
+
+        if forecast_frames:
+          combined_df = pd.concat([filtered_df, pd.concat(forecast_frames, ignore_index=True)], ignore_index=True)
+        else:
+          combined_df = filtered_df
+
+        if combined_df.empty:
           st.warning("No data found for the selected commodity and date range.")
         else:
+          if forecast_frames:
+            st.info(
+                f"Data beyond {max_df_date.strftime('%Y-%m-%d')} is a "
+                "model forecast (dashed line), not real recorded prices. "
+                "Treat anything more than ~90 days past that date as a "
+                "rough seasonal estimate, not a precise number."
+            )
           fig2 = px.line(
-              filtered_df,
+              combined_df,
               x="date",
               y="avg_price",
               color="commodity",
+              line_dash="type",
+              line_dash_map={"Actual": "solid", "Forecast": "dash"},
               title=(
                   f"Price Trend from {start_date.strftime('%Y-%m-%d')} to"
                   f" {end_date.strftime('%Y-%m-%d')}"
@@ -402,7 +452,7 @@ if data_loaded:
 
           st.markdown("### 📊 Summary Statistics")
           stats = (
-              filtered_df.groupby("commodity")["avg_price"]
+              combined_df.groupby("commodity")["avg_price"]
               .agg(
                   Min_Price="min",
                   Max_Price="max",
